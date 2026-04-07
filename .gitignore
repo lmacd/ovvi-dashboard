@@ -1,0 +1,15 @@
+# Data files (don't commit spreadsheets to git)
+data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS
+.DS_Store
+Thumbs.db
