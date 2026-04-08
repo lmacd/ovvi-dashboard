@@ -3,7 +3,10 @@
     "allow": [
       "Bash(taskkill //F //IM streamlit.exe)",
       "Bash(taskkill //F //IM python.exe)",
-      "Bash(py -3 -m streamlit run app.py --server.headless true)"
+      "Bash(py -3 -m streamlit run app.py --server.headless true)",
+      "Bash(git -C C:/Users/langs/Projects/ovvi-dashboard add -A)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ]
   }
 }

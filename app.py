@@ -180,7 +180,7 @@ def add_fw_lines(fig, fw_df):
     colors = px.colors.qualitative.Set2
     for i, row in fw_df.iterrows():
         fig.add_vline(
-            x=row["first_seen_date"],
+            x=row["first_seen_date"].strftime("%Y-%m-%d"),
             line_dash="dash",
             line_color=colors[i % len(colors)],
             opacity=0.5,
