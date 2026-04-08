@@ -158,7 +158,7 @@ agg_period = st.sidebar.radio(
 )
 
 # Show firmware lines toggle
-show_fw_lines = st.sidebar.checkbox("Show firmware version lines", value=False)
+show_fw_lines = st.sidebar.checkbox("Show firmware version lines", value=True)
 
 # Load firmware data if needed
 fw_df = load_fw(str(data_file)) if show_fw_lines else pd.DataFrame()
