@@ -282,30 +282,25 @@ def load_error_data(filepath: str | Path) -> pd.DataFrame:
 
 def load_firmware_updates(filepath: str | Path = None) -> pd.DataFrame:
     """
-    Load firmware update timeline.
-    
-    For now, this extracts unique firmware versions and their earliest
-    appearance date from the error data. When you get the real FW update
-    schedule from the team, replace this function.
-    
+    Returns known firmware deployment dates.
+
+    Only formally released versions are included — intermediate versions
+    that were superseded without a formal deployment are excluded.
+    Update this table when new firmware versions are released.
+
     Returns DataFrame with columns: version, first_seen_date
     """
-    if filepath is None:
-        return pd.DataFrame(columns=["version", "first_seen_date"])
-    
-    df = load_error_data(filepath)
-    if df.empty:
-        return pd.DataFrame(columns=["version", "first_seen_date"])
-    
-    fw_dates = (
-        df.dropna(subset=["firmware_version"])
-        .groupby("firmware_version")["date"]
-        .min()
-        .reset_index()
-        .rename(columns={"firmware_version": "version", "date": "first_seen_date"})
-        .sort_values("first_seen_date")
-    )
-    return fw_dates
+    FIRMWARE_RELEASES = [
+        ("ovvi-fw-v1.0.0", "2025-05-30"),
+        ("ovvi-fw-v1.0.2", "2025-06-16"),
+        ("ovvi-fw-v1.0.4", "2025-08-22"),
+        ("ovvi-fw-v1.0.5", "2025-09-09"),
+        ("ovvi-fw-v1.0.6", "2025-09-25"),
+        ("ovvi-fw-v1.0.7", "2026-01-21"),
+    ]
+    df = pd.DataFrame(FIRMWARE_RELEASES, columns=["version", "first_seen_date"])
+    df["first_seen_date"] = pd.to_datetime(df["first_seen_date"])
+    return df
 
 
 # ---------------------------------------------------------------------------
