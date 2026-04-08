@@ -28,6 +28,22 @@ st.set_page_config(
 
 
 # ---------------------------------------------------------------------------
+# Auth
+# ---------------------------------------------------------------------------
+
+def check_password():
+    pw = st.sidebar.text_input("Password", type="password")
+    if pw == "":
+        st.sidebar.info("Enter the password to access the dashboard.")
+        st.stop()
+    if pw != st.secrets["password"]:
+        st.sidebar.error("Incorrect password.")
+        st.stop()
+
+check_password()
+
+
+# ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
 
@@ -174,10 +190,21 @@ def add_fw_lines(fig, fw_df):
         )
 
 
+RANGE_SELECTOR = dict(
+    buttons=[
+        dict(count=7,  label="1W", step="day",   stepmode="backward"),
+        dict(count=1,  label="1M", step="month", stepmode="backward"),
+        dict(count=3,  label="3M", step="month", stepmode="backward"),
+        dict(count=6,  label="6M", step="month", stepmode="backward"),
+        dict(step="all", label="All"),
+    ]
+)
+
+
 def make_time_series(df_plot, value_col="count", color_col=None, title="", agg="sum"):
-    """Create a time-series line/bar chart with proper resampling."""
+    """Create a time-series chart with zoom range selector. Base resolution set by sidebar."""
     key = resample_key(agg_period)
-    
+
     if color_col and color_col in df_plot.columns:
         grouped = (
             df_plot.set_index("date")
@@ -191,21 +218,27 @@ def make_time_series(df_plot, value_col="count", color_col=None, title="", agg="
             df_plot.set_index("date")
             .resample(key)[value_col]
             .sum()
+            .fillna(0)
             .reset_index()
         )
         fig = px.bar(grouped, x="date", y=value_col, title=title)
-    
+
     fig.update_layout(
+        xaxis=dict(
+            rangeselector=RANGE_SELECTOR,
+            rangeslider=dict(visible=True, thickness=0.05),
+            type="date",
+        ),
         xaxis_title="",
         yaxis_title="Error Count",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(t=60, b=40),
-        height=400,
+        height=450,
     )
-    
+
     if show_fw_lines:
         add_fw_lines(fig, fw_df)
-    
+
     return fig
 
 
@@ -245,8 +278,37 @@ tab_overview, tab_by_code, tab_by_unit, tab_heatmap, tab_drilldown, tab_raw = st
 # === TAB: Overview ===
 with tab_overview:
     st.subheader("Total Errors Over Time")
-    fig = make_time_series(df, title="All Errors Over Time")
-    st.plotly_chart(fig, use_container_width=True)
+
+    overview_grouped = (
+        df.set_index("date")
+        .resample(resample_key(agg_period))["count"]
+        .sum()
+        .fillna(0)
+        .reset_index()
+    )
+    fig_total = px.bar(overview_grouped, x="date", y="count", title="All Errors Over Time")
+    fig_total.update_layout(
+        xaxis=dict(
+            rangeselector=dict(
+                buttons=[
+                    dict(count=7,  label="1W", step="day",   stepmode="backward"),
+                    dict(count=1,  label="1M", step="month", stepmode="backward"),
+                    dict(count=3,  label="3M", step="month", stepmode="backward"),
+                    dict(count=6,  label="6M", step="month", stepmode="backward"),
+                    dict(step="all", label="All"),
+                ]
+            ),
+            rangeslider=dict(visible=True, thickness=0.05),
+            type="date",
+        ),
+        xaxis_title="",
+        yaxis_title="Error Count",
+        margin=dict(t=60, b=40),
+        height=450,
+    )
+    if show_fw_lines:
+        add_fw_lines(fig_total, fw_df)
+    st.plotly_chart(fig_total, use_container_width=True)
 
     # By unit type
     st.subheader("Errors by Unit Group")
