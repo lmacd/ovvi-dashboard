@@ -179,14 +179,21 @@ def add_fw_lines(fig, fw_df):
         return
     colors = px.colors.qualitative.Set2
     for i, row in fw_df.iterrows():
-        fig.add_vline(
-            x=row["first_seen_date"].strftime("%Y-%m-%d"),
-            line_dash="dash",
-            line_color=colors[i % len(colors)],
+        x = row["first_seen_date"].strftime("%Y-%m-%d")
+        color = colors[i % len(colors)]
+        label = row["version"].replace("ovvi-fw-", "")
+        fig.add_shape(
+            type="line",
+            x0=x, x1=x, y0=0, y1=1,
+            xref="x", yref="paper",
+            line=dict(dash="dash", color=color, width=1),
             opacity=0.5,
-            annotation_text=row["version"].replace("ovvi-fw-", ""),
-            annotation_position="top",
-            annotation_font_size=9,
+        )
+        fig.add_annotation(
+            x=x, y=1, xref="x", yref="paper",
+            text=label, showarrow=False,
+            font=dict(size=9, color=color),
+            xanchor="left", yanchor="bottom",
         )
 
 
