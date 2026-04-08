@@ -173,27 +173,41 @@ def resample_key(period: str) -> str:
     return {"Daily": "D", "Weekly": "W", "Monthly": "MS"}[period]
 
 
-def add_fw_lines(fig, fw_df):
+def add_fw_lines(fig, fw_df, date_min=None, date_max=None):
     """Add vertical lines for firmware version first appearances."""
     if fw_df.empty:
         return
+    # Only draw lines within the data's date range
+    visible = fw_df.copy()
+    if date_min is not None:
+        visible = visible[visible["first_seen_date"] >= pd.Timestamp(date_min)]
+    if date_max is not None:
+        visible = visible[visible["first_seen_date"] <= pd.Timestamp(date_max)]
+    if visible.empty:
+        return
+
     colors = px.colors.qualitative.Set2
-    for i, row in fw_df.iterrows():
+    # Stagger label y positions to reduce overlap
+    y_positions = [0.99, 0.88, 0.77, 0.66]
+    for j, (_, row) in enumerate(visible.iterrows()):
         x = row["first_seen_date"].strftime("%Y-%m-%d")
-        color = colors[i % len(colors)]
+        color = colors[j % len(colors)]
         label = row["version"].replace("ovvi-fw-", "")
         fig.add_shape(
             type="line",
             x0=x, x1=x, y0=0, y1=1,
             xref="x", yref="paper",
             line=dict(dash="dash", color=color, width=1),
-            opacity=0.5,
+            opacity=0.6,
         )
         fig.add_annotation(
-            x=x, y=1, xref="x", yref="paper",
+            x=x, y=y_positions[j % len(y_positions)],
+            xref="x", yref="paper",
             text=label, showarrow=False,
-            font=dict(size=9, color=color),
-            xanchor="left", yanchor="bottom",
+            font=dict(size=10, color=color),
+            xanchor="left", yanchor="middle",
+            bgcolor="rgba(0,0,0,0.4)",
+            borderpad=2,
         )
 
 
@@ -244,7 +258,7 @@ def make_time_series(df_plot, value_col="count", color_col=None, title="", agg="
     )
 
     if show_fw_lines:
-        add_fw_lines(fig, fw_df)
+        add_fw_lines(fig, fw_df, df_plot["date"].min(), df_plot["date"].max())
 
     return fig
 
@@ -314,7 +328,7 @@ with tab_overview:
         height=450,
     )
     if show_fw_lines:
-        add_fw_lines(fig_total, fw_df)
+        add_fw_lines(fig_total, fw_df, df["date"].min(), df["date"].max())
     st.plotly_chart(fig_total, use_container_width=True)
 
     # By unit type
