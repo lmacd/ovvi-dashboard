@@ -218,7 +218,7 @@ def _parse_error_definitions(wb) -> dict:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-def load_error_data(filepath: str | Path) -> pd.DataFrame:
+def load_error_data(filepath: str | Path | object) -> pd.DataFrame:
     """
     Load and normalize all error data from the Fleet QC spreadsheet.
     

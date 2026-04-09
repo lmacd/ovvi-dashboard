@@ -55,15 +55,17 @@ DATA_DIR = Path("data")
 
 
 @st.cache_data
-def load_data(filepath: str) -> pd.DataFrame:
+def load_data(filepath: str | None, file_bytes: bytes | None = None) -> pd.DataFrame:
     """Load and cache the error data."""
-    return load_error_data(filepath)
+    import io
+    source = io.BytesIO(file_bytes) if file_bytes is not None else filepath
+    return load_error_data(source)
 
 
 @st.cache_data
-def load_fw(filepath: str) -> pd.DataFrame:
-    """Load and cache firmware update timeline."""
-    return load_firmware_updates(filepath)
+def load_fw() -> pd.DataFrame:
+    """Load firmware update timeline (from hardcoded release table)."""
+    return load_firmware_updates()
 
 
 def find_data_file() -> Path | None:
@@ -85,22 +87,16 @@ data_file = find_data_file()
 uploaded = st.sidebar.file_uploader("Upload spreadsheet", type=["xlsx"])
 
 if uploaded:
-    # Save uploaded file temporarily
-    DATA_DIR.mkdir(exist_ok=True)
-    tmp_path = DATA_DIR / uploaded.name
-    tmp_path.write_bytes(uploaded.getvalue())
-    data_file = tmp_path
     st.sidebar.success(f"Loaded: {uploaded.name}")
+    df = load_data(None, file_bytes=uploaded.getvalue())
 elif data_file:
     st.sidebar.info(f"Using: {data_file.name}")
+    df = load_data(str(data_file))
 else:
     st.sidebar.warning("No data file found. Upload a spreadsheet or place one in the `data/` folder.")
     st.title("Ovvi Fleet Error Dashboard")
     st.write("Upload a Fleet QC spreadsheet to get started.")
     st.stop()
-
-# Load data
-df = load_data(str(data_file))
 
 if df.empty:
     st.error("No error data found in the spreadsheet. Check that the file has 'Error Code Trend' sheets.")
@@ -165,7 +161,7 @@ agg_period = st.sidebar.radio(
 show_fw_lines = st.sidebar.checkbox("Show firmware version lines", value=True)
 
 # Always load firmware data (used by fw lines and predictor tab)
-fw_df = load_fw(str(data_file))
+fw_df = load_fw()
 
 
 # ---------------------------------------------------------------------------
