@@ -226,7 +226,8 @@ def load_error_data(filepath: str | Path | object) -> pd.DataFrame:
         date, error_code, count, serial_number, unit_name,
         firmware_version, unit_type, error_category, error_name
     """
-    filepath = Path(filepath)
+    if isinstance(filepath, (str, Path)):
+        filepath = Path(filepath)
     wb = load_workbook(filepath, read_only=True, data_only=True)
 
     # Parse both horizontal sheets
