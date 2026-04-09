@@ -277,7 +277,53 @@ def load_error_data(filepath: str | Path) -> pd.DataFrame:
     # Drop the source_sheet column — it was only for dedup logic
     df = df.drop(columns=["source_sheet"], errors="ignore")
 
+    # Infer firmware version from event date. Then cap it at the spreadsheet's
+    # reported firmware version — if a unit hasn't been updated, the spreadsheet
+    # column is the ground truth and the date-based inference would be too high.
+    fw_order = {v: i for i, (v, _) in enumerate(FIRMWARE_RELEASES)}
+
+    def resolve_firmware(row):
+        date_fw = infer_firmware_version(row["date"])
+        sheet_fw = row["firmware_version"]
+        if date_fw is None:
+            return sheet_fw
+        if sheet_fw not in fw_order:
+            return date_fw  # unknown sheet value, trust the date
+        # Use whichever is older
+        if fw_order[sheet_fw] < fw_order[date_fw]:
+            return sheet_fw
+        return date_fw
+
+    df["inferred_firmware"] = df.apply(resolve_firmware, axis=1)
+
     return df
+
+
+def infer_firmware_version(date: pd.Timestamp) -> str | None:
+    """
+    Return the firmware version that was active on a given date,
+    based on known deployment dates rather than the spreadsheet's firmware column
+    (which reflects the unit's current firmware, not the firmware at time of error).
+    Returns None if the date precedes all known firmware releases.
+    """
+    active = None
+    for version, deploy_date in FIRMWARE_RELEASES:
+        if pd.Timestamp(deploy_date) <= date:
+            active = version
+        else:
+            break
+    return active
+
+
+FIRMWARE_RELEASES = [
+    ("ovvi-fw-v1.0.0", "2025-05-30"),
+    ("ovvi-fw-v1.0.2", "2025-06-16"),
+    ("ovvi-fw-v1.0.4", "2025-08-22"),
+    ("ovvi-fw-v1.0.5", "2025-09-09"),
+    ("ovvi-fw-v1.0.6", "2025-09-25"),
+    ("ovvi-fw-v1.0.7", "2026-01-21"),
+    ("ovvi-fw-v1.0.8", "2026-03-11"),
+]
 
 
 def load_firmware_updates(filepath: str | Path = None) -> pd.DataFrame:
@@ -290,14 +336,6 @@ def load_firmware_updates(filepath: str | Path = None) -> pd.DataFrame:
 
     Returns DataFrame with columns: version, first_seen_date
     """
-    FIRMWARE_RELEASES = [
-        ("ovvi-fw-v1.0.0", "2025-05-30"),
-        ("ovvi-fw-v1.0.2", "2025-06-16"),
-        ("ovvi-fw-v1.0.4", "2025-08-22"),
-        ("ovvi-fw-v1.0.5", "2025-09-09"),
-        ("ovvi-fw-v1.0.6", "2025-09-25"),
-        ("ovvi-fw-v1.0.7", "2026-01-21"),
-    ]
     df = pd.DataFrame(FIRMWARE_RELEASES, columns=["version", "first_seen_date"])
     df["first_seen_date"] = pd.to_datetime(df["first_seen_date"])
     return df

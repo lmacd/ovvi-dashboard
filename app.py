@@ -32,11 +32,15 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 
 def check_password():
+    try:
+        secret = st.secrets["password"]
+    except (KeyError, FileNotFoundError):
+        return  # running locally without secrets configured — skip auth
     pw = st.sidebar.text_input("Password", type="password")
     if pw == "":
         st.sidebar.info("Enter the password to access the dashboard.")
         st.stop()
-    if pw != st.secrets["password"]:
+    if pw != secret:
         st.sidebar.error("Incorrect password.")
         st.stop()
 
@@ -160,8 +164,8 @@ agg_period = st.sidebar.radio(
 # Show firmware lines toggle
 show_fw_lines = st.sidebar.checkbox("Show firmware version lines", value=True)
 
-# Load firmware data if needed
-fw_df = load_fw(str(data_file)) if show_fw_lines else pd.DataFrame()
+# Always load firmware data (used by fw lines and predictor tab)
+fw_df = load_fw(str(data_file))
 
 
 # ---------------------------------------------------------------------------
@@ -286,12 +290,13 @@ st.markdown("---")
 # Tab layout for different views
 # ---------------------------------------------------------------------------
 
-tab_overview, tab_by_code, tab_by_unit, tab_heatmap, tab_drilldown, tab_raw = st.tabs([
+tab_overview, tab_by_code, tab_by_unit, tab_heatmap, tab_drilldown, tab_predictor, tab_raw = st.tabs([
     "📈 Overview",
     "🔢 By Error Code",
     "📦 By Unit",
     "🗺️ Heatmap",
     "🔍 Unit Drill-Down",
+    "🎯 New Unit Predictor",
     "📋 Raw Data",
 ])
 
@@ -488,7 +493,7 @@ with tab_drilldown:
         ucol2.metric("Unique Codes", df_unit["error_code"].nunique())
         sn = df_unit["serial_number"].dropna().unique()
         ucol3.metric("Serial Number", sn[0] if len(sn) > 0 else "Unknown")
-        fw = df_unit["firmware_version"].dropna().unique()
+        fw = df_unit["inferred_firmware"].dropna().unique()
         ucol4.metric("Firmware", ", ".join(fw) if len(fw) > 0 else "Unknown")
 
         # Timeline
@@ -511,9 +516,150 @@ with tab_drilldown:
         # Full event log for this unit
         with st.expander("Full event log"):
             st.dataframe(
-                df_unit[["date", "error_code", "error_name", "count", "firmware_version"]]
+                df_unit[["date", "error_code", "error_name", "count", "inferred_firmware"]]
                 .sort_values("date"),
                 use_container_width=True,
+            )
+
+
+# === TAB: New Unit Predictor ===
+with tab_predictor:
+    st.subheader("New Unit Error Risk Profile")
+
+    TODAY = pd.Timestamp.today().normalize()
+    MIN_DEPLOYMENT_DAYS = 14
+
+    # Find the reference firmware: most recent version deployed >= 14 days ago
+    eligible = fw_df[fw_df["first_seen_date"] <= TODAY - pd.Timedelta(days=MIN_DEPLOYMENT_DAYS)]
+
+    if eligible.empty:
+        st.warning("No firmware version has been deployed for at least 14 days. Check back later.")
+    else:
+        ref_fw = eligible.sort_values("first_seen_date").iloc[-1]
+        ref_version = ref_fw["version"]
+        ref_date = ref_fw["first_seen_date"]
+        days_deployed = (TODAY - ref_date).days
+
+        # --- Methodology box ---
+        st.info(
+            f"""
+**How this is calculated**
+
+- **Reference firmware:** `{ref_version}` — the most recent version deployed at least {MIN_DEPLOYMENT_DAYS} days ago.
+- **Deployed:** {ref_date.strftime('%B %d, %Y')} ({days_deployed} days ago). Versions deployed less than {MIN_DEPLOYMENT_DAYS} days ago are excluded to avoid incomplete error data from early deployment.
+- **Sample:** all units that logged at least one event while running `{ref_version}`, filtered to only rows recorded on that firmware version.
+- **Model:** errors are assumed to occur at a constant rate (Poisson process). The observed rate per unit per day is calculated from the historical data and projected forward to a 30-day window.
+- **Exposure days:** each unit's exposure is counted from when it *first appeared on the reference firmware*, not from the firmware release date. Units that received the update late are not penalised — their shorter exposure is accounted for in the denominator.
+- **% Units Affected (empirical):** the proportion of sampled units that experienced this error at least once — the most direct measure of how widespread an error is.
+- **Avg Occurrences if Affected:** mean total occurrences among units that had the error — shows severity when it does occur. High values with low % affected means a concentrated problem on a few units.
+- **Expected Occurrences (30d fleet avg):** Poisson projection of `rate × 30` averaged across all units including those unaffected — useful for fleet-level support load estimation, but can be misleading for errors concentrated on few units.
+- **Threshold:** errors affecting fewer than 5% of units are excluded.
+- **Assumption:** the model assumes a steady error rate with no early burn-in or wear-out effects. Treat projections as indicative, not precise.
+- Sidebar filters (unit group, error category, routine message exclusion) are applied before this analysis.
+            """
+        )
+
+        # Filter to reference firmware rows only, using the *unfiltered* df
+        # but respecting sidebar filters already applied to df
+        df_ref = df[df["inferred_firmware"] == ref_version].copy()
+
+        if df_ref.empty:
+            st.warning(f"No error data found for `{ref_version}` after current filters.")
+        else:
+            all_units = df_ref["unit_name"].dropna().unique()
+            n_units = len(all_units)
+
+            end_date = df_ref["date"].max()
+            unit_first_date = df_ref.groupby("unit_name")["date"].min()
+            unit_exposure_days = ((end_date - unit_first_date).dt.days + 1)
+            total_exposure_days = unit_exposure_days.sum()
+            avg_exposure_days = unit_exposure_days.mean()
+
+            pcol1, pcol2, pcol3 = st.columns(3)
+            pcol1.metric("Units in Sample", n_units)
+            pcol2.metric("Avg Exposure per Unit", f"{avg_exposure_days:.0f} days")
+            pcol3.metric("Total Unit-Days", f"{total_exposure_days:,}")
+
+            import math
+
+            # Per-unit totals for each error code
+            per_unit = (
+                df_ref.groupby(["unit_name", "error_code", "error_name"])["count"]
+                .sum()
+                .reset_index()
+            )
+
+            # Aggregate stats per error code
+            stats = (
+                per_unit.groupby(["error_code", "error_name"])
+                .agg(
+                    units_affected=("unit_name", "nunique"),
+                    avg_per_affected=("count", "mean"),
+                    total=("count", "sum"),
+                )
+                .reset_index()
+            )
+
+            # Poisson projections using actual exposure days as denominator
+            stats["rate_per_unit_per_day"] = stats["total"] / total_exposure_days
+            stats["expected_30d"] = stats["rate_per_unit_per_day"] * 30
+            stats["pct_units_affected"] = stats["units_affected"] / n_units * 100
+            stats = stats.sort_values("pct_units_affected", ascending=False)
+            stats = stats[stats["pct_units_affected"] >= 5.0]
+
+            # Chart: % units affected (empirical)
+            labels = stats["error_code"] + " — " + stats["error_name"]
+            fig = go.Figure(go.Bar(
+                x=stats["pct_units_affected"],
+                y=labels,
+                orientation="h",
+                marker=dict(
+                    color=stats["pct_units_affected"],
+                    colorscale="Reds",
+                    showscale=False,
+                ),
+            ))
+            fig.add_trace(go.Scatter(
+                x=[100], y=[labels.iloc[0]],
+                mode="markers", marker=dict(opacity=0, size=0),
+                showlegend=False, hoverinfo="skip",
+            ))
+            fig.update_layout(
+                title="% of Units Affected by Each Error (Empirical)",
+                xaxis=dict(
+                    range=[0, 100],
+                    ticksuffix="%",
+                    dtick=10,
+                    showgrid=True,
+                    gridcolor="rgba(255,255,255,0.15)",
+                    gridwidth=1,
+                    title="% Units Affected",
+                ),
+                yaxis=dict(autorange="reversed"),
+                height=max(400, len(stats) * 28),
+                margin=dict(l=280),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+            # Table with full stats
+            st.subheader("Detailed Projections")
+            display = stats[[
+                "error_code", "error_name",
+                "pct_units_affected", "avg_per_affected", "expected_30d", "units_affected"
+            ]].copy()
+            display.columns = [
+                "Code", "Name",
+                "% Units Affected", "Avg Occurrences if Affected",
+                "Expected Occurrences (30d fleet avg)", "Units Affected"
+            ]
+            st.dataframe(
+                display.style.format({
+                    "% Units Affected": "{:.1f}%",
+                    "Avg Occurrences if Affected": "{:.1f}",
+                    "Expected Occurrences (30d fleet avg)": "{:.2f}",
+                }),
+                use_container_width=True,
+                height=400,
             )
 
 
@@ -522,7 +668,7 @@ with tab_raw:
     st.subheader("Filtered Data Table")
     st.write(f"Showing {len(df):,} events after filters")
     st.dataframe(
-        df[["date", "error_code", "error_name", "count", "unit_name", "unit_type", "serial_number", "firmware_version"]]
+        df[["date", "error_code", "error_name", "count", "unit_name", "unit_type", "serial_number", "inferred_firmware"]]
         .sort_values("date", ascending=False),
         use_container_width=True,
         height=600,
