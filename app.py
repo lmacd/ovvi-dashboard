@@ -730,6 +730,47 @@ with tab_fw_compare:
         )
         st.plotly_chart(fig_ov, use_container_width=True)
 
+        # Top codes per version heatmap
+        st.markdown("#### Top Error Codes by Firmware Version (normalized)")
+        top_n_codes = st.slider("Top N codes to show", 5, 20, 10, key="fw_top_n")
+
+        # Build rate matrix: error_code × fw_version
+        rate_rows = []
+        for v in fw_versions:
+            _, ud, _, _ = _fw_unit_days(v)
+            if ud == 0:
+                continue
+            v_df = df[df["inferred_firmware"] == v]
+            code_totals = v_df.groupby("error_code")["count"].sum()
+            for code, total in code_totals.items():
+                rate_rows.append({"fw": v.replace("ovvi-fw-", ""), "error_code": code, "rate": total / ud})
+
+        if rate_rows:
+            rate_df = pd.DataFrame(rate_rows)
+            # Pick top N codes by max rate across any version
+            top_codes = (
+                rate_df.groupby("error_code")["rate"].max()
+                .sort_values(ascending=False)
+                .head(top_n_codes)
+                .index.tolist()
+            )
+            rate_df = rate_df[rate_df["error_code"].isin(top_codes)]
+            pivot = rate_df.pivot_table(index="error_code", columns="fw", values="rate", fill_value=0)
+            # Sort columns (fw versions) numerically
+            pivot = pivot[sorted(pivot.columns, key=lambda v: tuple(int(n) for n in _re.findall(r'\d+', v)))]
+            # Sort rows by total rate descending
+            pivot = pivot.loc[pivot.sum(axis=1).sort_values(ascending=False).index]
+
+            fig_heat = px.imshow(
+                pivot,
+                labels=dict(x="Firmware Version", y="Error Code", color="Rate/unit-day"),
+                color_continuous_scale="YlOrRd",
+                aspect="auto",
+                title="Error Rate per Unit-Day by Firmware Version",
+            )
+            fig_heat.update_layout(height=max(300, len(top_codes) * 30), margin=dict(l=120, t=60))
+            st.plotly_chart(fig_heat, use_container_width=True)
+
         st.markdown("---")
         st.markdown("#### Per-Code Drill-Down: Compare Two Versions")
 
