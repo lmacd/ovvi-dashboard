@@ -286,13 +286,14 @@ st.markdown("---")
 # Tab layout for different views
 # ---------------------------------------------------------------------------
 
-tab_overview, tab_by_code, tab_by_unit, tab_heatmap, tab_drilldown, tab_predictor, tab_raw = st.tabs([
+tab_overview, tab_by_code, tab_by_unit, tab_heatmap, tab_drilldown, tab_predictor, tab_fw_compare, tab_raw = st.tabs([
     "📈 Overview",
     "🔢 By Error Code",
     "📦 By Unit",
     "🗺️ Heatmap",
     "🔍 Unit Drill-Down",
     "🎯 New Unit Predictor",
+    "⚖️ FW Comparison",
     "📋 Raw Data",
 ])
 
@@ -476,9 +477,18 @@ with tab_heatmap:
 with tab_drilldown:
     st.subheader("Individual Unit Drill-Down")
 
-    # Unit selector
-    unit_names = sorted(df["unit_name"].dropna().unique())
-    selected_unit = st.selectbox("Select a unit", options=unit_names)
+    # Unit selector — search by name or serial number
+    search = st.text_input("Search by name or serial number", placeholder="e.g. Patrick or A1B2C3D4E5F6")
+    if search:
+        mask = (
+            df["unit_name"].str.contains(search, case=False, na=False) |
+            df["serial_number"].str.contains(search, case=False, na=False)
+        )
+        matches = sorted(df[mask]["unit_name"].dropna().unique())
+    else:
+        matches = sorted(df["unit_name"].dropna().unique())
+
+    selected_unit = st.selectbox("Select a unit", options=matches)
 
     if selected_unit:
         df_unit = df[df["unit_name"] == selected_unit]
@@ -656,6 +666,137 @@ with tab_predictor:
                 }),
                 use_container_width=True,
                 height=400,
+            )
+
+
+# === TAB: FW Comparison ===
+with tab_fw_compare:
+    st.subheader("Firmware Version Comparison")
+
+    fw_versions = sorted(df["inferred_firmware"].dropna().unique())
+
+    if len(fw_versions) < 2:
+        st.warning("Not enough firmware versions in the current data to compare.")
+    else:
+        col_a, col_b = st.columns(2)
+        default_a = fw_versions[-2] if len(fw_versions) >= 2 else fw_versions[0]
+        default_b = fw_versions[-1]
+        fw_a = col_a.selectbox("Firmware A", options=fw_versions, index=fw_versions.index(default_a))
+        fw_b = col_b.selectbox("Firmware B", options=fw_versions, index=fw_versions.index(default_b))
+
+        all_codes = sorted(df["error_code"].unique())
+        selected_compare_codes = st.multiselect(
+            "Error codes to compare",
+            options=all_codes,
+            default=[c for c in ["A8-002", "A7-002", "A5-002"] if c in all_codes] or all_codes[:3],
+            help="Pick one or more error codes to compare across the two firmware versions.",
+        )
+
+        if fw_a == fw_b:
+            st.warning("Select two different firmware versions.")
+        elif not selected_compare_codes:
+            st.info("Select at least one error code.")
+        else:
+            def fw_stats(version, codes):
+                d = df[(df["inferred_firmware"] == version) & (df["error_code"].isin(codes))]
+                all_units_on_fw = df[df["inferred_firmware"] == version]["unit_name"].dropna().unique()
+                n_units = len(all_units_on_fw)
+
+                if d.empty or n_units == 0:
+                    return pd.DataFrame(), n_units, 0
+
+                # Exposure: days each unit was active on this firmware
+                unit_first = d.groupby("unit_name")["date"].min()
+                unit_last = d.groupby("unit_name")["date"].max()
+                # Use the full fw window for units with any activity
+                end_date = df[df["inferred_firmware"] == version]["date"].max()
+                start_date = df[df["inferred_firmware"] == version]["date"].min()
+                total_unit_days = (end_date - start_date).days * n_units or 1
+
+                per_unit = d.groupby(["error_code", "unit_name"])["count"].sum().reset_index()
+                stats = per_unit.groupby("error_code").agg(
+                    total=("count", "sum"),
+                    units_affected=("unit_name", "nunique"),
+                ).reset_index()
+                stats["pct_units_affected"] = stats["units_affected"] / n_units * 100
+                stats["rate_per_unit_day"] = stats["total"] / total_unit_days
+                return stats, n_units, total_unit_days
+
+            stats_a, n_a, days_a = fw_stats(fw_a, selected_compare_codes)
+            stats_b, n_b, days_b = fw_stats(fw_b, selected_compare_codes)
+
+            # Merge for side-by-side
+            merged = pd.DataFrame({"error_code": selected_compare_codes})
+            for label, stats in [(fw_a, stats_a), (fw_b, stats_b)]:
+                short = label.replace("ovvi-fw-", "")
+                if stats.empty:
+                    merged[f"total_{short}"] = 0
+                    merged[f"pct_{short}"] = 0.0
+                    merged[f"rate_{short}"] = 0.0
+                else:
+                    s = stats.set_index("error_code")
+                    merged[f"total_{short}"] = merged["error_code"].map(s["total"]).fillna(0).astype(int)
+                    merged[f"pct_{short}"] = merged["error_code"].map(s["pct_units_affected"]).fillna(0)
+                    merged[f"rate_{short}"] = merged["error_code"].map(s["rate_per_unit_day"]).fillna(0)
+
+            short_a = fw_a.replace("ovvi-fw-", "")
+            short_b = fw_b.replace("ovvi-fw-", "")
+
+            # Context metrics
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric(f"{short_a} — Units", n_a)
+            m2.metric(f"{short_b} — Units", n_b)
+            m3.metric(f"{short_a} — Unit-Days", f"{days_a:,}")
+            m4.metric(f"{short_b} — Unit-Days", f"{days_b:,}")
+
+            st.caption("Rates are normalized by unit-days so versions with more units or longer deployment periods are fairly compared.")
+
+            # Chart 1: % units affected
+            fig_pct = go.Figure()
+            fig_pct.add_trace(go.Bar(name=short_a, x=merged["error_code"], y=merged[f"pct_{short_a}"], marker_color="#636EFA"))
+            fig_pct.add_trace(go.Bar(name=short_b, x=merged["error_code"], y=merged[f"pct_{short_b}"], marker_color="#EF553B"))
+            fig_pct.update_layout(
+                barmode="group",
+                title="% of Units Affected",
+                yaxis=dict(ticksuffix="%", title="% Units Affected"),
+                xaxis_title="Error Code",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                height=380,
+                margin=dict(t=60),
+            )
+            st.plotly_chart(fig_pct, use_container_width=True)
+
+            # Chart 2: rate per unit-day (normalized)
+            fig_rate = go.Figure()
+            fig_rate.add_trace(go.Bar(name=short_a, x=merged["error_code"], y=merged[f"rate_{short_a}"], marker_color="#636EFA"))
+            fig_rate.add_trace(go.Bar(name=short_b, x=merged["error_code"], y=merged[f"rate_{short_b}"], marker_color="#EF553B"))
+            fig_rate.update_layout(
+                barmode="group",
+                title="Error Rate (occurrences per unit per day, normalized)",
+                yaxis_title="Rate / unit-day",
+                xaxis_title="Error Code",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                height=380,
+                margin=dict(t=60),
+            )
+            st.plotly_chart(fig_rate, use_container_width=True)
+
+            # Summary table
+            st.subheader("Summary Table")
+            display = merged.copy()
+            display.columns = [
+                "Error Code",
+                f"Total ({short_a})", f"% Affected ({short_a})", f"Rate/unit-day ({short_a})",
+                f"Total ({short_b})", f"% Affected ({short_b})", f"Rate/unit-day ({short_b})",
+            ]
+            st.dataframe(
+                display.style.format({
+                    f"% Affected ({short_a})": "{:.1f}%",
+                    f"% Affected ({short_b})": "{:.1f}%",
+                    f"Rate/unit-day ({short_a})": "{:.5f}",
+                    f"Rate/unit-day ({short_b})": "{:.5f}",
+                }),
+                use_container_width=True,
             )
 
 
