@@ -781,19 +781,12 @@ with tab_fw_compare:
         fw_a = col_a.selectbox("Firmware A", options=fw_versions, index=fw_versions.index(default_a))
         fw_b = col_b.selectbox("Firmware B", options=fw_versions, index=fw_versions.index(default_b))
 
-        all_codes = sorted(df["error_code"].unique())
-        selected_compare_codes = st.multiselect(
-            "Error codes to compare",
-            options=all_codes,
-            default=[c for c in ["A8-002", "A7-002", "A5-002"] if c in all_codes] or all_codes[:3],
-            help="Pick one or more error codes to compare across the two firmware versions.",
-        )
-
         if fw_a == fw_b:
             st.warning("Select two different firmware versions.")
-        elif not selected_compare_codes:
-            st.info("Select at least one error code.")
         else:
+            short_a = fw_a.replace("ovvi-fw-", "")
+            short_b = fw_b.replace("ovvi-fw-", "")
+
             def fw_code_stats(version, codes):
                 d = df[(df["inferred_firmware"] == version) & (df["error_code"].isin(codes))]
                 n, total_unit_days, start, end = _fw_unit_days(version)
@@ -806,86 +799,148 @@ with tab_fw_compare:
                     units_affected=("unit_name", "nunique"),
                 ).reset_index()
                 stats["pct_units_affected"] = stats["units_affected"] / n * 100
-                # Rate per affected unit-day: only counts units that actually saw the error
                 stats["rate_per_unit_day"] = stats["total"] / (stats["units_affected"] * span)
                 return stats, n, total_unit_days
 
-            stats_a, n_a, days_a = fw_code_stats(fw_a, selected_compare_codes)
-            stats_b, n_b, days_b = fw_code_stats(fw_b, selected_compare_codes)
+            def get_top_codes(version, n):
+                """Return top N error codes for a version, ranked by raw count."""
+                d = df[df["inferred_firmware"] == version]
+                return (
+                    d.groupby("error_code")["count"].sum()
+                    .sort_values(ascending=False)
+                    .head(n)
+                    .index.tolist()
+                )
 
-            short_a = fw_a.replace("ovvi-fw-", "")
-            short_b = fw_b.replace("ovvi-fw-", "")
+            def cross_compare_chart(source_ver, other_ver, top_codes, source_short, other_short):
+                """Bar chart: top codes from source_ver, with bars for both versions."""
+                stats_src, _, _ = fw_code_stats(source_ver, top_codes)
+                stats_oth, _, _ = fw_code_stats(other_ver, top_codes)
 
-            # Merge for side-by-side
-            merged = pd.DataFrame({"error_code": selected_compare_codes})
-            for label, stats in [(fw_a, stats_a), (fw_b, stats_b)]:
-                short = label.replace("ovvi-fw-", "")
-                if stats.empty:
-                    merged[f"total_{short}"] = 0
-                    merged[f"pct_{short}"] = 0.0
-                    merged[f"rate_{short}"] = 0.0
-                else:
-                    s = stats.set_index("error_code")
-                    merged[f"total_{short}"] = merged["error_code"].map(s["total"]).fillna(0).astype(int)
-                    merged[f"pct_{short}"] = merged["error_code"].map(s["pct_units_affected"]).fillna(0)
-                    merged[f"rate_{short}"] = merged["error_code"].map(s["rate_per_unit_day"]).fillna(0)
+                rows = []
+                for code in top_codes:
+                    for label, stats in [(source_short, stats_src), (other_short, stats_oth)]:
+                        if not stats.empty and code in stats["error_code"].values:
+                            r = stats[stats["error_code"] == code].iloc[0]
+                            rate = r["rate_per_unit_day"]
+                            pct = r["pct_units_affected"]
+                        else:
+                            rate, pct = 0.0, 0.0
+                        rows.append({"code": code, "fw": label, "rate": rate, "pct": pct})
 
-            # Context metrics
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric(f"{short_a} — Units", n_a)
-            m2.metric(f"{short_b} — Units", n_b)
-            m3.metric(f"{short_a} — Unit-Days", f"{days_a:,}")
-            m4.metric(f"{short_b} — Unit-Days", f"{days_b:,}")
+                cdf = pd.DataFrame(rows)
+                fig = go.Figure()
+                colors = {"fw_a": "#636EFA", "fw_b": "#EF553B"}
+                for fw_label, color in [(source_short, "#636EFA"), (other_short, "#EF553B")]:
+                    sub = cdf[cdf["fw"] == fw_label]
+                    fig.add_trace(go.Bar(
+                        name=fw_label,
+                        y=sub["code"],
+                        x=sub["rate"],
+                        orientation="h",
+                        marker_color=color,
+                        customdata=sub["pct"],
+                        hovertemplate="%{y}<br>Rate/affected unit-day: %{x:.5f}<br>% Units affected: %{customdata:.1f}%<extra>" + fw_label + "</extra>",
+                    ))
+                fig.update_layout(
+                    barmode="group",
+                    title=f"Top {len(top_codes)} errors from {source_short} — how do they look on {other_short}?",
+                    xaxis_title="Rate / affected unit-day",
+                    yaxis=dict(autorange="reversed"),
+                    yaxis_title="",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    height=max(350, len(top_codes) * 40),
+                    margin=dict(l=100, t=70),
+                )
+                return fig
 
-            st.caption("Rates are normalized by unit-days so versions with more units or longer deployment periods are fairly compared.")
+            st.markdown("---")
+            top_n_cross = st.slider("Top N errors to cross-compare", 3, 15, 8, key="cross_n")
 
-            # Chart 1: % units affected
-            fig_pct = go.Figure()
-            fig_pct.add_trace(go.Bar(name=short_a, x=merged["error_code"], y=merged[f"pct_{short_a}"], marker_color="#636EFA"))
-            fig_pct.add_trace(go.Bar(name=short_b, x=merged["error_code"], y=merged[f"pct_{short_b}"], marker_color="#EF553B"))
-            fig_pct.update_layout(
-                barmode="group",
-                title="% of Units Affected",
-                yaxis=dict(ticksuffix="%", title="% Units Affected"),
-                xaxis_title="Error Code",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                height=380,
-                margin=dict(t=60),
+            top_from_a = get_top_codes(fw_a, top_n_cross)
+            top_from_b = get_top_codes(fw_b, top_n_cross)
+
+            st.markdown(f"#### {short_a}'s biggest problems — did {short_b} fix them?")
+            st.plotly_chart(cross_compare_chart(fw_a, fw_b, top_from_a, short_a, short_b), use_container_width=True)
+
+            st.markdown(f"#### {short_b}'s biggest problems — were they already in {short_a}?")
+            st.plotly_chart(cross_compare_chart(fw_b, fw_a, top_from_b, short_b, short_a), use_container_width=True)
+
+            st.markdown("---")
+            st.markdown("#### Manual Code Drill-Down")
+            all_codes = sorted(df["error_code"].unique())
+            selected_compare_codes = st.multiselect(
+                "Select specific error codes to compare",
+                options=all_codes,
+                default=[c for c in ["A8-002", "A7-002", "A5-002"] if c in all_codes] or all_codes[:3],
             )
-            st.plotly_chart(fig_pct, use_container_width=True)
 
-            # Chart 2: rate per unit-day (normalized)
-            fig_rate = go.Figure()
-            fig_rate.add_trace(go.Bar(name=short_a, x=merged["error_code"], y=merged[f"rate_{short_a}"], marker_color="#636EFA"))
-            fig_rate.add_trace(go.Bar(name=short_b, x=merged["error_code"], y=merged[f"rate_{short_b}"], marker_color="#EF553B"))
-            fig_rate.update_layout(
-                barmode="group",
-                title="Error Rate per Affected Unit per Day",
-                yaxis_title="Rate / affected unit-day",
-                xaxis_title="Error Code",
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                height=380,
-                margin=dict(t=60),
-            )
-            st.plotly_chart(fig_rate, use_container_width=True)
+            if selected_compare_codes:
+                stats_a, n_a, days_a = fw_code_stats(fw_a, selected_compare_codes)
+                stats_b, n_b, days_b = fw_code_stats(fw_b, selected_compare_codes)
 
-            # Summary table
-            st.subheader("Summary Table")
-            display = merged.copy()
-            display.columns = [
-                "Error Code",
-                f"Raw Count ({short_a})", f"% Affected ({short_a})", f"Rate/affected unit-day ({short_a})",
-                f"Raw Count ({short_b})", f"% Affected ({short_b})", f"Rate/affected unit-day ({short_b})",
-            ]
-            st.dataframe(
-                display.style.format({
-                    f"% Affected ({short_a})": "{:.1f}%",
-                    f"% Affected ({short_b})": "{:.1f}%",
-                    f"Rate/affected unit-day ({short_a})": "{:.5f}",
-                    f"Rate/affected unit-day ({short_b})": "{:.5f}",
-                }),
-                use_container_width=True,
-            )
+                # Merge for side-by-side
+                merged = pd.DataFrame({"error_code": selected_compare_codes})
+                for label, stats in [(fw_a, stats_a), (fw_b, stats_b)]:
+                    short = label.replace("ovvi-fw-", "")
+                    if stats.empty:
+                        merged[f"total_{short}"] = 0
+                        merged[f"pct_{short}"] = 0.0
+                        merged[f"rate_{short}"] = 0.0
+                    else:
+                        s = stats.set_index("error_code")
+                        merged[f"total_{short}"] = merged["error_code"].map(s["total"]).fillna(0).astype(int)
+                        merged[f"pct_{short}"] = merged["error_code"].map(s["pct_units_affected"]).fillna(0)
+                        merged[f"rate_{short}"] = merged["error_code"].map(s["rate_per_unit_day"]).fillna(0)
+
+                # Context metrics
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric(f"{short_a} — Units", n_a)
+                m2.metric(f"{short_b} — Units", n_b)
+                m3.metric(f"{short_a} — Unit-Days", f"{days_a:,}")
+                m4.metric(f"{short_b} — Unit-Days", f"{days_b:,}")
+
+                st.caption("Rates are per affected unit-day — only units that experienced the error are in the denominator.")
+
+                fig_pct = go.Figure()
+                fig_pct.add_trace(go.Bar(name=short_a, x=merged["error_code"], y=merged[f"pct_{short_a}"], marker_color="#636EFA"))
+                fig_pct.add_trace(go.Bar(name=short_b, x=merged["error_code"], y=merged[f"pct_{short_b}"], marker_color="#EF553B"))
+                fig_pct.update_layout(
+                    barmode="group", title="% of Units Affected",
+                    yaxis=dict(ticksuffix="%", title="% Units Affected"),
+                    xaxis_title="Error Code",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    height=380, margin=dict(t=60),
+                )
+                st.plotly_chart(fig_pct, use_container_width=True)
+
+                fig_rate = go.Figure()
+                fig_rate.add_trace(go.Bar(name=short_a, x=merged["error_code"], y=merged[f"rate_{short_a}"], marker_color="#636EFA"))
+                fig_rate.add_trace(go.Bar(name=short_b, x=merged["error_code"], y=merged[f"rate_{short_b}"], marker_color="#EF553B"))
+                fig_rate.update_layout(
+                    barmode="group", title="Error Rate per Affected Unit per Day",
+                    yaxis_title="Rate / affected unit-day", xaxis_title="Error Code",
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                    height=380, margin=dict(t=60),
+                )
+                st.plotly_chart(fig_rate, use_container_width=True)
+
+                st.subheader("Summary Table")
+                display = merged.copy()
+                display.columns = [
+                    "Error Code",
+                    f"Raw Count ({short_a})", f"% Affected ({short_a})", f"Rate/affected unit-day ({short_a})",
+                    f"Raw Count ({short_b})", f"% Affected ({short_b})", f"Rate/affected unit-day ({short_b})",
+                ]
+                st.dataframe(
+                    display.style.format({
+                        f"% Affected ({short_a})": "{:.1f}%",
+                        f"% Affected ({short_b})": "{:.1f}%",
+                        f"Rate/affected unit-day ({short_a})": "{:.5f}",
+                        f"Rate/affected unit-day ({short_b})": "{:.5f}",
+                    }),
+                    use_container_width=True,
+                )
 
 
 # === TAB: Raw Data ===
