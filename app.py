@@ -796,16 +796,18 @@ with tab_fw_compare:
         else:
             def fw_code_stats(version, codes):
                 d = df[(df["inferred_firmware"] == version) & (df["error_code"].isin(codes))]
-                n, total_unit_days, _, _ = _fw_unit_days(version)
+                n, total_unit_days, start, end = _fw_unit_days(version)
                 if d.empty or n == 0:
                     return pd.DataFrame(), n, total_unit_days
+                span = (end - start).days or 1
                 per_unit = d.groupby(["error_code", "unit_name"])["count"].sum().reset_index()
                 stats = per_unit.groupby("error_code").agg(
                     total=("count", "sum"),
                     units_affected=("unit_name", "nunique"),
                 ).reset_index()
                 stats["pct_units_affected"] = stats["units_affected"] / n * 100
-                stats["rate_per_unit_day"] = stats["total"] / (total_unit_days or 1)
+                # Rate per affected unit-day: only counts units that actually saw the error
+                stats["rate_per_unit_day"] = stats["total"] / (stats["units_affected"] * span)
                 return stats, n, total_unit_days
 
             stats_a, n_a, days_a = fw_code_stats(fw_a, selected_compare_codes)
@@ -858,8 +860,8 @@ with tab_fw_compare:
             fig_rate.add_trace(go.Bar(name=short_b, x=merged["error_code"], y=merged[f"rate_{short_b}"], marker_color="#EF553B"))
             fig_rate.update_layout(
                 barmode="group",
-                title="Error Rate (occurrences per unit per day, normalized)",
-                yaxis_title="Rate / unit-day",
+                title="Error Rate per Affected Unit per Day",
+                yaxis_title="Rate / affected unit-day",
                 xaxis_title="Error Code",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
                 height=380,
@@ -872,15 +874,15 @@ with tab_fw_compare:
             display = merged.copy()
             display.columns = [
                 "Error Code",
-                f"Total ({short_a})", f"% Affected ({short_a})", f"Rate/unit-day ({short_a})",
-                f"Total ({short_b})", f"% Affected ({short_b})", f"Rate/unit-day ({short_b})",
+                f"Raw Count ({short_a})", f"% Affected ({short_a})", f"Rate/affected unit-day ({short_a})",
+                f"Raw Count ({short_b})", f"% Affected ({short_b})", f"Rate/affected unit-day ({short_b})",
             ]
             st.dataframe(
                 display.style.format({
                     f"% Affected ({short_a})": "{:.1f}%",
                     f"% Affected ({short_b})": "{:.1f}%",
-                    f"Rate/unit-day ({short_a})": "{:.5f}",
-                    f"Rate/unit-day ({short_b})": "{:.5f}",
+                    f"Rate/affected unit-day ({short_a})": "{:.5f}",
+                    f"Rate/affected unit-day ({short_b})": "{:.5f}",
                 }),
                 use_container_width=True,
             )
