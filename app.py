@@ -12,7 +12,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
-from parsers import load_error_data, load_firmware_updates, IGNORE_CODES, get_error_name
+from parsers import load_error_data, load_firmware_updates, IGNORE_CODES, get_error_name, FIRMWARE_RELEASES
 
 
 # ---------------------------------------------------------------------------
@@ -55,8 +55,8 @@ DATA_DIR = Path("data")
 
 
 @st.cache_data
-def load_data(filepath: str | None, file_bytes: bytes | None = None) -> pd.DataFrame:
-    """Load and cache the error data."""
+def load_data(filepath: str | None, file_bytes: bytes | None = None, fw_releases: tuple = tuple(FIRMWARE_RELEASES)) -> pd.DataFrame:
+    """Load and cache the error data. fw_releases is included so cache busts when firmware table changes."""
     import io
     source = io.BytesIO(file_bytes) if file_bytes is not None else filepath
     return load_error_data(source)
@@ -88,10 +88,10 @@ uploaded = st.sidebar.file_uploader("Upload spreadsheet", type=["xlsx"])
 
 if uploaded:
     st.sidebar.success(f"Loaded: {uploaded.name}")
-    df = load_data(None, file_bytes=uploaded.getvalue())
+    df = load_data(None, file_bytes=uploaded.getvalue(), fw_releases=tuple(FIRMWARE_RELEASES))
 elif data_file:
     st.sidebar.info(f"Using: {data_file.name}")
-    df = load_data(str(data_file))
+    df = load_data(str(data_file), fw_releases=tuple(FIRMWARE_RELEASES))
 else:
     st.sidebar.warning("No data file found. Upload a spreadsheet or place one in the `data/` folder.")
     st.title("Ovvi Fleet Error Dashboard")
