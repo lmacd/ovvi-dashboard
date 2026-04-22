@@ -673,13 +673,68 @@ with tab_predictor:
 with tab_fw_compare:
     st.subheader("Firmware Version Comparison")
 
-    fw_versions = sorted(df["inferred_firmware"].dropna().unique())
+    import re as _re
+
+    def _fw_sort_key(v):
+        nums = _re.findall(r'\d+', v)
+        return tuple(int(n) for n in nums)
+
+    def _fw_unit_days(version):
+        """Return (n_units, total_unit_days, start, end) for a firmware version."""
+        d = df[df["inferred_firmware"] == version]
+        units = d["unit_name"].dropna().unique()
+        n = len(units)
+        if n == 0:
+            return n, 0, None, None
+        start = d["date"].min()
+        end = d["date"].max()
+        span = (end - start).days or 1
+        return n, span * n, start, end
+
+    fw_versions = sorted(df["inferred_firmware"].dropna().unique(), key=_fw_sort_key)
 
     if len(fw_versions) < 2:
         st.warning("Not enough firmware versions in the current data to compare.")
     else:
+        # --- Overview: all versions ---
+        st.markdown("#### Total Error Rate by Firmware Version (all versions)")
+        st.caption("Normalized by unit-days so versions with more units or longer deployments are fairly compared.")
+
+        overview_rows = []
+        for v in fw_versions:
+            n, ud, start, end = _fw_unit_days(v)
+            total = df[df["inferred_firmware"] == v]["count"].sum()
+            overview_rows.append({
+                "version": v.replace("ovvi-fw-", ""),
+                "total_errors": total,
+                "unit_days": ud,
+                "n_units": n,
+                "rate_per_unit_day": total / ud if ud else 0,
+                "deployed": start.strftime("%b %d") if start is not None else "",
+            })
+        ov_df = pd.DataFrame(overview_rows)
+
+        fig_ov = go.Figure()
+        fig_ov.add_trace(go.Bar(
+            x=ov_df["version"],
+            y=ov_df["rate_per_unit_day"],
+            text=ov_df.apply(lambda r: f"{r['total_errors']:,} errors<br>{r['n_units']} units<br>since {r['deployed']}", axis=1),
+            hovertemplate="%{x}<br>%{text}<br>Rate: %{y:.5f}/unit-day<extra></extra>",
+            marker=dict(color=ov_df["rate_per_unit_day"], colorscale="Blues", showscale=False),
+        ))
+        fig_ov.update_layout(
+            xaxis_title="Firmware Version",
+            yaxis_title="Errors / unit-day",
+            height=350,
+            margin=dict(t=20, b=40),
+        )
+        st.plotly_chart(fig_ov, use_container_width=True)
+
+        st.markdown("---")
+        st.markdown("#### Per-Code Drill-Down: Compare Two Versions")
+
         col_a, col_b = st.columns(2)
-        default_a = fw_versions[-2] if len(fw_versions) >= 2 else fw_versions[0]
+        default_a = fw_versions[-2]
         default_b = fw_versions[-1]
         fw_a = col_a.selectbox("Firmware A", options=fw_versions, index=fw_versions.index(default_a))
         fw_b = col_b.selectbox("Firmware B", options=fw_versions, index=fw_versions.index(default_b))
@@ -697,33 +752,25 @@ with tab_fw_compare:
         elif not selected_compare_codes:
             st.info("Select at least one error code.")
         else:
-            def fw_stats(version, codes):
+            def fw_code_stats(version, codes):
                 d = df[(df["inferred_firmware"] == version) & (df["error_code"].isin(codes))]
-                all_units_on_fw = df[df["inferred_firmware"] == version]["unit_name"].dropna().unique()
-                n_units = len(all_units_on_fw)
-
-                if d.empty or n_units == 0:
-                    return pd.DataFrame(), n_units, 0
-
-                # Exposure: days each unit was active on this firmware
-                unit_first = d.groupby("unit_name")["date"].min()
-                unit_last = d.groupby("unit_name")["date"].max()
-                # Use the full fw window for units with any activity
-                end_date = df[df["inferred_firmware"] == version]["date"].max()
-                start_date = df[df["inferred_firmware"] == version]["date"].min()
-                total_unit_days = (end_date - start_date).days * n_units or 1
-
+                n, total_unit_days, _, _ = _fw_unit_days(version)
+                if d.empty or n == 0:
+                    return pd.DataFrame(), n, total_unit_days
                 per_unit = d.groupby(["error_code", "unit_name"])["count"].sum().reset_index()
                 stats = per_unit.groupby("error_code").agg(
                     total=("count", "sum"),
                     units_affected=("unit_name", "nunique"),
                 ).reset_index()
-                stats["pct_units_affected"] = stats["units_affected"] / n_units * 100
-                stats["rate_per_unit_day"] = stats["total"] / total_unit_days
-                return stats, n_units, total_unit_days
+                stats["pct_units_affected"] = stats["units_affected"] / n * 100
+                stats["rate_per_unit_day"] = stats["total"] / (total_unit_days or 1)
+                return stats, n, total_unit_days
 
-            stats_a, n_a, days_a = fw_stats(fw_a, selected_compare_codes)
-            stats_b, n_b, days_b = fw_stats(fw_b, selected_compare_codes)
+            stats_a, n_a, days_a = fw_code_stats(fw_a, selected_compare_codes)
+            stats_b, n_b, days_b = fw_code_stats(fw_b, selected_compare_codes)
+
+            short_a = fw_a.replace("ovvi-fw-", "")
+            short_b = fw_b.replace("ovvi-fw-", "")
 
             # Merge for side-by-side
             merged = pd.DataFrame({"error_code": selected_compare_codes})
@@ -738,9 +785,6 @@ with tab_fw_compare:
                     merged[f"total_{short}"] = merged["error_code"].map(s["total"]).fillna(0).astype(int)
                     merged[f"pct_{short}"] = merged["error_code"].map(s["pct_units_affected"]).fillna(0)
                     merged[f"rate_{short}"] = merged["error_code"].map(s["rate_per_unit_day"]).fillna(0)
-
-            short_a = fw_a.replace("ovvi-fw-", "")
-            short_b = fw_b.replace("ovvi-fw-", "")
 
             # Context metrics
             m1, m2, m3, m4 = st.columns(4)
