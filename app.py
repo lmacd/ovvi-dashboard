@@ -730,46 +730,47 @@ with tab_fw_compare:
         )
         st.plotly_chart(fig_ov, use_container_width=True)
 
-        # Top codes per version heatmap
-        st.markdown("#### Top Error Codes by Firmware Version (normalized)")
-        top_n_codes = st.slider("Top N codes to show", 5, 20, 10, key="fw_top_n")
+        # Top codes per selected version
+        st.markdown("#### Top Error Codes by Firmware Version")
+        tc1, tc2 = st.columns([1, 1])
+        selected_fw_for_codes = tc1.selectbox(
+            "Show top codes for", options=fw_versions,
+            index=len(fw_versions) - 1, key="fw_top_codes_ver",
+            format_func=lambda v: v.replace("ovvi-fw-", ""),
+        )
+        top_n_codes = tc2.slider("Top N", 5, 20, 10, key="fw_top_n")
 
-        # Build rate matrix: error_code × fw_version
-        rate_rows = []
-        for v in fw_versions:
-            _, ud, _, _ = _fw_unit_days(v)
-            if ud == 0:
-                continue
-            v_df = df[df["inferred_firmware"] == v]
-            code_totals = v_df.groupby("error_code")["count"].sum()
-            for code, total in code_totals.items():
-                rate_rows.append({"fw": v.replace("ovvi-fw-", ""), "error_code": code, "rate": total / ud})
-
-        if rate_rows:
-            rate_df = pd.DataFrame(rate_rows)
-            # Pick top N codes by max rate across any version
-            top_codes = (
-                rate_df.groupby("error_code")["rate"].max()
-                .sort_values(ascending=False)
+        n_sel, ud_sel, _, _ = _fw_unit_days(selected_fw_for_codes)
+        if ud_sel > 0:
+            sel_df = df[df["inferred_firmware"] == selected_fw_for_codes]
+            top_codes_df = (
+                sel_df.groupby(["error_code", "error_name"])["count"]
+                .sum()
+                .reset_index()
+                .sort_values("count", ascending=False)
                 .head(top_n_codes)
-                .index.tolist()
             )
-            rate_df = rate_df[rate_df["error_code"].isin(top_codes)]
-            pivot = rate_df.pivot_table(index="error_code", columns="fw", values="rate", fill_value=0)
-            # Sort columns (fw versions) numerically
-            pivot = pivot[sorted(pivot.columns, key=lambda v: tuple(int(n) for n in _re.findall(r'\d+', v)))]
-            # Sort rows by total rate descending
-            pivot = pivot.loc[pivot.sum(axis=1).sort_values(ascending=False).index]
+            top_codes_df["label"] = top_codes_df["error_code"] + " — " + top_codes_df["error_name"]
+            top_codes_df["rate"] = top_codes_df["count"] / ud_sel
 
-            fig_heat = px.imshow(
-                pivot,
-                labels=dict(x="Firmware Version", y="Error Code", color="Rate/unit-day"),
-                color_continuous_scale="YlOrRd",
-                aspect="auto",
-                title="Error Rate per Unit-Day by Firmware Version",
+            fig_top = px.bar(
+                top_codes_df,
+                x="count", y="label", orientation="h",
+                title=f"Top {top_n_codes} Codes — {selected_fw_for_codes.replace('ovvi-fw-', '')} ({n_sel} units)",
+                color="count", color_continuous_scale="Reds",
+                custom_data=["rate"],
             )
-            fig_heat.update_layout(height=max(300, len(top_codes) * 30), margin=dict(l=120, t=60))
-            st.plotly_chart(fig_heat, use_container_width=True)
+            fig_top.update_traces(
+                hovertemplate="%{y}<br>Count: %{x}<br>Rate/unit-day: %{customdata[0]:.5f}<extra></extra>"
+            )
+            fig_top.update_layout(
+                yaxis=dict(autorange="reversed"),
+                yaxis_title="", xaxis_title="Total Count",
+                height=max(350, top_n_codes * 28),
+                margin=dict(l=260),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_top, use_container_width=True)
 
         st.markdown("---")
         st.markdown("#### Per-Code Drill-Down: Compare Two Versions")
