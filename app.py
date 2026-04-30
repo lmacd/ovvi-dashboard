@@ -1115,23 +1115,32 @@ with tab_build:
 # === TAB: Fleet Activity (dev only) ===
 with tab_fleet:
     st.subheader("Fleet Activity Over Time")
-    st.caption("'Came online' = week of a unit's first error. 'Went quiet' = week of last error for units not seen recently. Category = build version if unit list is loaded, otherwise unit type.")
+    st.caption("'Came online' = week of a unit's first error. 'Went quiet' = week of last error for units not seen recently.")
 
     # Use build_version if loaded, else unit_type
     has_build = not df["build_version"].eq("Unknown").all()
     cat_col = "build_version" if has_build else "unit_type"
     cat_label = "Build Version" if has_build else "Unit Type"
 
+    # Unit type filter — default to Customer only
+    all_unit_types = sorted(df["unit_type"].dropna().unique())
+    fleet_type_filter = st.multiselect(
+        "Unit types to include",
+        options=all_unit_types,
+        default=["Customer"] if "Customer" in all_unit_types else all_unit_types,
+        key="fleet_type_filter",
+    )
+    df_fleet = df[df["unit_type"].isin(fleet_type_filter)] if fleet_type_filter else df
+
     # Per-unit first/last seen
     unit_activity = (
-        df.groupby(["unit_name", cat_col])["date"]
+        df_fleet.groupby(["unit_name", cat_col, "unit_type"])["date"]
         .agg(first_seen="min", last_seen="max")
         .reset_index()
     )
     unit_activity["first_week"] = unit_activity["first_seen"].dt.to_period("W").dt.start_time
     unit_activity["last_week"] = unit_activity["last_seen"].dt.to_period("W").dt.start_time
 
-    # "Active" = last seen within last 28 days of the data's max date
     data_end = df["date"].max()
     quiet_cutoff_days = st.slider("'Went quiet' threshold (days since last seen)", 7, 60, 28, key="quiet_days")
     quiet_cutoff = data_end - pd.Timedelta(days=quiet_cutoff_days)
@@ -1221,6 +1230,36 @@ with tab_fleet:
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
     st.plotly_chart(fig_cum, use_container_width=True)
+
+    # --- Chart 4: Scatter — active unit count per week ---
+    st.markdown("#### Active Units per Week (Scatter)")
+    st.caption("Each point = one week. Shows how many units logged at least one error that week.")
+
+    all_weeks_scatter = pd.date_range(
+        start=unit_activity["first_week"].min(),
+        end=unit_activity["last_week"].max(),
+        freq="W-MON",
+    )
+    scatter_rows = []
+    for week in all_weeks_scatter:
+        for cat in sorted(unit_activity[cat_col].unique()):
+            cat_units = unit_activity[unit_activity[cat_col] == cat]
+            count = ((cat_units["first_week"] <= week) & (cat_units["last_week"] >= week)).sum()
+            scatter_rows.append({"week": week, cat_col: cat, "active_units": count})
+
+    scatter_df = pd.DataFrame(scatter_rows)
+    fig_scatter = px.scatter(
+        scatter_df, x="week", y="active_units", color=cat_col,
+        title="Active Customer Units per Week",
+        labels={"week": "", "active_units": "Active Units", cat_col: cat_label},
+        size="active_units", size_max=20,
+    )
+    fig_scatter.update_layout(
+        xaxis=dict(rangeselector=RANGE_SELECTOR, rangeslider=dict(visible=True, thickness=0.05), type="date"),
+        height=420, margin=dict(t=60),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig_scatter, use_container_width=True)
 
     # --- Unit list table ---
     with st.expander("Full unit activity list"):
