@@ -1117,11 +1117,6 @@ with tab_fleet:
     st.subheader("Fleet Activity Over Time")
     st.caption("'Came online' = week of a unit's first error. 'Went quiet' = week of last error for units not seen recently.")
 
-    # Use build_version if loaded, else unit_type
-    has_build = not df["build_version"].eq("Unknown").all()
-    cat_col = "build_version" if has_build else "unit_type"
-    cat_label = "Build Version" if has_build else "Unit Type"
-
     # Unit type filter — default to Customer only
     all_unit_types = sorted(df["unit_type"].dropna().unique())
     fleet_type_filter = st.multiselect(
@@ -1132,9 +1127,9 @@ with tab_fleet:
     )
     df_fleet = df[df["unit_type"].isin(fleet_type_filter)] if fleet_type_filter else df
 
-    # Per-unit first/last seen
+    # Per-unit first/last seen — no category breakdown, all units counted equally
     unit_activity = (
-        df_fleet.groupby(["unit_name", cat_col, "unit_type"])["date"]
+        df_fleet.groupby("unit_name")["date"]
         .agg(first_seen="min", last_seen="max")
         .reset_index()
     )
@@ -1148,7 +1143,6 @@ with tab_fleet:
     active_units = unit_activity[unit_activity["last_seen"] >= quiet_cutoff]
     quiet_units = unit_activity[unit_activity["last_seen"] < quiet_cutoff]
 
-    # Summary metrics
     s1, s2, s3, s4 = st.columns(4)
     s1.metric("Total Units", len(unit_activity))
     s2.metric("Currently Active", len(active_units))
@@ -1157,21 +1151,15 @@ with tab_fleet:
 
     # --- Chart 1: Units coming online per week ---
     st.markdown("#### Units Coming Online (first seen per week)")
-    online_weekly = (
-        unit_activity.groupby(["first_week", cat_col])
-        .size()
-        .reset_index(name="units")
-    )
+    online_weekly = unit_activity.groupby("first_week").size().reset_index(name="units")
     fig_online = px.bar(
-        online_weekly, x="first_week", y="units", color=cat_col,
+        online_weekly, x="first_week", y="units",
         title="New Units Coming Online per Week",
-        labels={"first_week": "", "units": "Units", cat_col: cat_label},
-        barmode="stack",
+        labels={"first_week": "", "units": "Units"},
     )
     fig_online.update_layout(
         xaxis=dict(rangeselector=RANGE_SELECTOR, rangeslider=dict(visible=True, thickness=0.05), type="date"),
-        height=400, margin=dict(t=60),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=380, margin=dict(t=60),
     )
     st.plotly_chart(fig_online, use_container_width=True)
 
@@ -1180,84 +1168,59 @@ with tab_fleet:
     if quiet_units.empty:
         st.info(f"No units have gone quiet (all seen within last {quiet_cutoff_days} days).")
     else:
-        quiet_weekly = (
-            quiet_units.groupby(["last_week", cat_col])
-            .size()
-            .reset_index(name="units")
-        )
+        quiet_weekly = quiet_units.groupby("last_week").size().reset_index(name="units")
         fig_quiet = px.bar(
-            quiet_weekly, x="last_week", y="units", color=cat_col,
+            quiet_weekly, x="last_week", y="units",
             title="Units Going Quiet per Week",
-            labels={"last_week": "", "units": "Units", cat_col: cat_label},
-            barmode="stack",
-            color_discrete_sequence=px.colors.qualitative.Pastel,
+            labels={"last_week": "", "units": "Units"},
+            color_discrete_sequence=["#EF553B"],
         )
         fig_quiet.update_layout(
             xaxis=dict(rangeselector=RANGE_SELECTOR, rangeslider=dict(visible=True, thickness=0.05), type="date"),
-            height=400, margin=dict(t=60),
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            height=380, margin=dict(t=60),
         )
         st.plotly_chart(fig_quiet, use_container_width=True)
 
-    # --- Chart 3: Cumulative active fleet over time ---
-    st.markdown("#### Cumulative Active Fleet Over Time")
+    # --- Chart 3: Cumulative active fleet over time (line) ---
+    st.markdown("#### Active Fleet Over Time")
     st.caption("A unit is counted as active from its first error week through its last error week.")
 
-    # Build weekly snapshots: for each week, count units whose first_seen <= week <= last_seen
     all_weeks = pd.date_range(
         start=unit_activity["first_week"].min(),
         end=unit_activity["last_week"].max(),
         freq="W-MON",
     )
-    categories = sorted(unit_activity[cat_col].unique())
-    cumulative_rows = []
-    for week in all_weeks:
-        for cat in categories:
-            cat_units = unit_activity[unit_activity[cat_col] == cat]
-            active_count = ((cat_units["first_week"] <= week) & (cat_units["last_week"] >= week)).sum()
-            cumulative_rows.append({"week": week, cat_col: cat, "active_units": active_count})
+    active_counts = [
+        {"week": w, "active_units": int(((unit_activity["first_week"] <= w) & (unit_activity["last_week"] >= w)).sum())}
+        for w in all_weeks
+    ]
+    cum_df = pd.DataFrame(active_counts)
 
-    cum_df = pd.DataFrame(cumulative_rows)
     fig_cum = px.line(
-        cum_df, x="week", y="active_units", color=cat_col,
+        cum_df, x="week", y="active_units",
         title="Active Fleet Size Over Time",
-        labels={"week": "", "active_units": "Active Units", cat_col: cat_label},
+        labels={"week": "", "active_units": "Active Units"},
         markers=True,
     )
     fig_cum.update_layout(
         xaxis=dict(rangeselector=RANGE_SELECTOR, rangeslider=dict(visible=True, thickness=0.05), type="date"),
-        height=420, margin=dict(t=60),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=400, margin=dict(t=60),
     )
     st.plotly_chart(fig_cum, use_container_width=True)
 
     # --- Chart 4: Scatter — active unit count per week ---
     st.markdown("#### Active Units per Week (Scatter)")
-    st.caption("Each point = one week. Shows how many units logged at least one error that week.")
+    st.caption("Each point = one week, sized by unit count.")
 
-    all_weeks_scatter = pd.date_range(
-        start=unit_activity["first_week"].min(),
-        end=unit_activity["last_week"].max(),
-        freq="W-MON",
-    )
-    scatter_rows = []
-    for week in all_weeks_scatter:
-        for cat in sorted(unit_activity[cat_col].unique()):
-            cat_units = unit_activity[unit_activity[cat_col] == cat]
-            count = ((cat_units["first_week"] <= week) & (cat_units["last_week"] >= week)).sum()
-            scatter_rows.append({"week": week, cat_col: cat, "active_units": count})
-
-    scatter_df = pd.DataFrame(scatter_rows)
     fig_scatter = px.scatter(
-        scatter_df, x="week", y="active_units", color=cat_col,
-        title="Active Customer Units per Week",
-        labels={"week": "", "active_units": "Active Units", cat_col: cat_label},
+        cum_df, x="week", y="active_units",
+        title="Active Units per Week",
+        labels={"week": "", "active_units": "Active Units"},
         size="active_units", size_max=20,
     )
     fig_scatter.update_layout(
         xaxis=dict(rangeselector=RANGE_SELECTOR, rangeslider=dict(visible=True, thickness=0.05), type="date"),
-        height=420, margin=dict(t=60),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=400, margin=dict(t=60),
     )
     st.plotly_chart(fig_scatter, use_container_width=True)
 
@@ -1269,7 +1232,7 @@ with tab_fleet:
         )
         display_activity["days_since_last_seen"] = (data_end - display_activity["last_seen"]).dt.days
         st.dataframe(
-            display_activity[["unit_name", cat_col, "first_seen", "last_seen", "days_since_last_seen", "status"]]
+            display_activity[["unit_name", "first_seen", "last_seen", "days_since_last_seen", "status"]]
             .sort_values("last_seen", ascending=False)
             .style.format({"first_seen": "{:%Y-%m-%d}", "last_seen": "{:%Y-%m-%d}"}),
             use_container_width=True,
