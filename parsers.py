@@ -328,6 +328,40 @@ FIRMWARE_RELEASES = [
 ]
 
 
+def load_build_versions(filepath: str | Path) -> dict:
+    """
+    Parse the unit list spreadsheet and return a dict mapping
+    serial_number (uppercase, no spaces) -> build_version ('EVT', 'DVT', 'PVT').
+
+    Reads the 'Completed Production Units' sheet. Column layout:
+      Col 0: row number
+      Col 1: manufacture date
+      Col 2: serial number
+      Col 3: build version (EVT / DVT / PVT / ES pvt / variants)
+      Col 4: notes (ignored)
+
+    'ES pvt' and any value containing 'PVT' maps to 'PVT'.
+    Rows with missing SN or unrecognised build version are skipped.
+    """
+    wb = load_workbook(filepath if not isinstance(filepath, Path) else str(filepath), read_only=True, data_only=True)
+    ws = wb["Completed Production Units"]
+    sn_to_build = {}
+    for row in ws.iter_rows(min_row=5, values_only=True):
+        sn_raw = row[2]
+        build_raw = row[3]
+        if not sn_raw or not build_raw or not isinstance(sn_raw, str):
+            continue
+        sn = sn_raw.strip().replace(" ", "").upper()
+        build = str(build_raw).strip().upper()
+        if "PVT" in build:
+            build = "PVT"
+        elif build not in ("EVT", "DVT"):
+            continue
+        if sn:
+            sn_to_build[sn] = build
+    return sn_to_build
+
+
 def load_firmware_updates(filepath: str | Path = None) -> pd.DataFrame:
     """
     Returns known firmware deployment dates.

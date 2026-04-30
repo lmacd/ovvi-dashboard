@@ -12,7 +12,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from pathlib import Path
-from parsers import load_error_data, load_firmware_updates, IGNORE_CODES, get_error_name, FIRMWARE_RELEASES
+from parsers import load_error_data, load_firmware_updates, load_build_versions, IGNORE_CODES, get_error_name, FIRMWARE_RELEASES
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +101,31 @@ else:
 if df.empty:
     st.error("No error data found in the spreadsheet. Check that the file has 'Error Code Trend' sheets.")
     st.stop()
+
+# --- Build version (DVT/PVT) join ---
+# Auto-detect unit list file: any xlsx in data/ that isn't the main QC report
+def find_unit_list_file() -> Path | None:
+    if not DATA_DIR.exists():
+        return None
+    for f in sorted(DATA_DIR.glob("*.xlsx"), key=lambda f: f.stat().st_mtime, reverse=True):
+        if "fleet" not in f.name.lower() and "qc" not in f.name.lower():
+            return f
+    return None
+
+unit_list_file = find_unit_list_file()
+uploaded_unit_list = st.sidebar.file_uploader("Upload unit list (optional)", type=["xlsx"], key="unit_list")
+
+build_version_map = {}
+if uploaded_unit_list:
+    import io
+    build_version_map = load_build_versions(io.BytesIO(uploaded_unit_list.getvalue()))
+elif unit_list_file:
+    build_version_map = load_build_versions(unit_list_file)
+
+if build_version_map:
+    df["build_version"] = df["serial_number"].map(build_version_map).fillna("Unknown")
+else:
+    df["build_version"] = "Unknown"
 
 # --- Filters ---
 st.sidebar.markdown("---")
@@ -286,7 +311,7 @@ st.markdown("---")
 # Tab layout for different views
 # ---------------------------------------------------------------------------
 
-tab_overview, tab_by_code, tab_by_unit, tab_heatmap, tab_drilldown, tab_predictor, tab_fw_compare, tab_raw = st.tabs([
+tab_overview, tab_by_code, tab_by_unit, tab_heatmap, tab_drilldown, tab_predictor, tab_fw_compare, tab_build, tab_fleet, tab_raw = st.tabs([
     "📈 Overview",
     "🔢 By Error Code",
     "📦 By Unit",
@@ -294,6 +319,8 @@ tab_overview, tab_by_code, tab_by_unit, tab_heatmap, tab_drilldown, tab_predicto
     "🔍 Unit Drill-Down",
     "🎯 New Unit Predictor",
     "⚖️ FW Comparison",
+    "🏗️ DVT vs PVT",
+    "📡 Fleet Activity",
     "📋 Raw Data",
 ])
 
@@ -941,6 +968,274 @@ with tab_fw_compare:
                     }),
                     use_container_width=True,
                 )
+
+
+# === TAB: DVT vs PVT ===
+with tab_build:
+    st.subheader("DVT vs PVT Build Comparison")
+
+    if df["build_version"].eq("Unknown").all():
+        st.warning("No unit list loaded. Upload the unit list spreadsheet using the sidebar uploader to enable this tab.")
+    else:
+        dvt_df = df[df["build_version"] == "DVT"]
+        pvt_df = df[df["build_version"] == "PVT"]
+
+        def build_unit_days(bdf):
+            """Total unit-days using per-unit first/last error date."""
+            if bdf.empty:
+                return 0, 0
+            per_unit = bdf.groupby("unit_name")["date"].agg(["min", "max"])
+            per_unit["days"] = (per_unit["max"] - per_unit["min"]).dt.days + 1
+            return len(per_unit), per_unit["days"].sum()
+
+        n_dvt, ud_dvt = build_unit_days(dvt_df)
+        n_pvt, ud_pvt = build_unit_days(pvt_df)
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("DVT Units", n_dvt)
+        m2.metric("PVT Units", n_pvt)
+        m3.metric("DVT Unit-Days", f"{ud_dvt:,}")
+        m4.metric("PVT Unit-Days", f"{ud_pvt:,}")
+        st.caption("Unit-days = sum of each unit's active date span (first to last error). Used to normalize rates fairly across groups with different fleet ages.")
+
+        # --- Overview: total error rate DVT vs PVT ---
+        st.markdown("#### Overall Error Rate")
+        ov_data = pd.DataFrame([
+            {"Build": "DVT", "rate": dvt_df["count"].sum() / ud_dvt if ud_dvt else 0, "total": dvt_df["count"].sum()},
+            {"Build": "PVT", "rate": pvt_df["count"].sum() / ud_pvt if ud_pvt else 0, "total": pvt_df["count"].sum()},
+        ])
+        fig_ov = px.bar(
+            ov_data, x="Build", y="rate", color="Build",
+            color_discrete_map={"DVT": "#636EFA", "PVT": "#EF553B"},
+            text=ov_data["total"].apply(lambda x: f"{x:,} total errors"),
+            title="Total Error Rate: DVT vs PVT (errors / unit-day)",
+        )
+        fig_ov.update_traces(textposition="outside")
+        fig_ov.update_layout(yaxis_title="Errors / unit-day", showlegend=False, height=350, margin=dict(t=60))
+        st.plotly_chart(fig_ov, use_container_width=True)
+
+        # --- Per-code comparison ---
+        st.markdown("#### Per-Error-Code Comparison")
+
+        def build_code_stats(bdf, n_units, unit_days, codes):
+            d = bdf[bdf["error_code"].isin(codes)]
+            if d.empty or unit_days == 0:
+                return pd.DataFrame()
+            per_unit = d.groupby(["error_code", "unit_name"])["count"].sum().reset_index()
+            stats = per_unit.groupby("error_code").agg(
+                total=("count", "sum"),
+                units_affected=("unit_name", "nunique"),
+            ).reset_index()
+            stats["pct_units_affected"] = stats["units_affected"] / n_units * 100
+            # Per-unit exposure for affected units only
+            affected_exposure = (
+                bdf[bdf["error_code"].isin(stats["error_code"])]
+                .groupby(["error_code", "unit_name"])["date"]
+                .agg(["min", "max"])
+                .reset_index()
+            )
+            affected_exposure["days"] = (affected_exposure["max"] - affected_exposure["min"]).dt.days + 1
+            affected_ud = affected_exposure.groupby("error_code")["days"].sum()
+            stats["rate_per_affected_unit_day"] = stats["total"] / stats["error_code"].map(affected_ud).clip(lower=1)
+            return stats
+
+        top_n_build = st.slider("Top N codes to compare (by combined occurrence)", 5, 20, 10, key="build_top_n")
+
+        # Pick top codes by total across both groups
+        combined_counts = (
+            df[df["build_version"].isin(["DVT", "PVT"])]
+            .groupby("error_code")["count"].sum()
+            .sort_values(ascending=False)
+            .head(top_n_build)
+        )
+        default_codes = combined_counts.index.tolist()
+
+        all_codes_build = sorted(df["error_code"].unique())
+        selected_build_codes = st.multiselect(
+            "Error codes", options=all_codes_build, default=default_codes, key="build_codes"
+        )
+
+        if selected_build_codes:
+            stats_dvt = build_code_stats(dvt_df, n_dvt, ud_dvt, selected_build_codes)
+            stats_pvt = build_code_stats(pvt_df, n_pvt, ud_pvt, selected_build_codes)
+
+            merged_build = pd.DataFrame({"error_code": selected_build_codes})
+            for label, stats in [("DVT", stats_dvt), ("PVT", stats_pvt)]:
+                if stats.empty:
+                    merged_build[f"total_{label}"] = 0
+                    merged_build[f"pct_{label}"] = 0.0
+                    merged_build[f"rate_{label}"] = 0.0
+                else:
+                    s = stats.set_index("error_code")
+                    merged_build[f"total_{label}"] = merged_build["error_code"].map(s["total"]).fillna(0).astype(int)
+                    merged_build[f"pct_{label}"] = merged_build["error_code"].map(s["pct_units_affected"]).fillna(0)
+                    merged_build[f"rate_{label}"] = merged_build["error_code"].map(s["rate_per_affected_unit_day"]).fillna(0)
+
+            # % units affected
+            fig_pct = go.Figure()
+            fig_pct.add_trace(go.Bar(name="DVT", x=merged_build["error_code"], y=merged_build["pct_DVT"], marker_color="#636EFA"))
+            fig_pct.add_trace(go.Bar(name="PVT", x=merged_build["error_code"], y=merged_build["pct_PVT"], marker_color="#EF553B"))
+            fig_pct.update_layout(
+                barmode="group", title="% of Units Affected — DVT vs PVT",
+                yaxis=dict(ticksuffix="%", title="% Units Affected"),
+                xaxis_title="Error Code",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                height=380, margin=dict(t=60),
+            )
+            st.plotly_chart(fig_pct, use_container_width=True)
+
+            # Rate per affected unit-day
+            fig_rate = go.Figure()
+            fig_rate.add_trace(go.Bar(name="DVT", x=merged_build["error_code"], y=merged_build["rate_DVT"], marker_color="#636EFA"))
+            fig_rate.add_trace(go.Bar(name="PVT", x=merged_build["error_code"], y=merged_build["rate_PVT"], marker_color="#EF553B"))
+            fig_rate.update_layout(
+                barmode="group", title="Error Rate per Affected Unit-Day — DVT vs PVT",
+                yaxis_title="Rate / affected unit-day", xaxis_title="Error Code",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                height=380, margin=dict(t=60),
+            )
+            st.plotly_chart(fig_rate, use_container_width=True)
+
+            # Summary table
+            st.subheader("Summary Table")
+            disp = merged_build.rename(columns={
+                "error_code": "Error Code",
+                "total_DVT": "Raw Count (DVT)", "pct_DVT": "% Affected (DVT)", "rate_DVT": "Rate/affected unit-day (DVT)",
+                "total_PVT": "Raw Count (PVT)", "pct_PVT": "% Affected (PVT)", "rate_PVT": "Rate/affected unit-day (PVT)",
+            })
+            st.dataframe(
+                disp.style.format({
+                    "% Affected (DVT)": "{:.1f}%", "% Affected (PVT)": "{:.1f}%",
+                    "Rate/affected unit-day (DVT)": "{:.5f}", "Rate/affected unit-day (PVT)": "{:.5f}",
+                }),
+                use_container_width=True,
+            )
+
+
+# === TAB: Fleet Activity (dev only) ===
+with tab_fleet:
+    st.subheader("Fleet Activity Over Time")
+    st.caption("'Came online' = week of a unit's first error. 'Went quiet' = week of last error for units not seen recently. Category = build version if unit list is loaded, otherwise unit type.")
+
+    # Use build_version if loaded, else unit_type
+    has_build = not df["build_version"].eq("Unknown").all()
+    cat_col = "build_version" if has_build else "unit_type"
+    cat_label = "Build Version" if has_build else "Unit Type"
+
+    # Per-unit first/last seen
+    unit_activity = (
+        df.groupby(["unit_name", cat_col])["date"]
+        .agg(first_seen="min", last_seen="max")
+        .reset_index()
+    )
+    unit_activity["first_week"] = unit_activity["first_seen"].dt.to_period("W").dt.start_time
+    unit_activity["last_week"] = unit_activity["last_seen"].dt.to_period("W").dt.start_time
+
+    # "Active" = last seen within last 28 days of the data's max date
+    data_end = df["date"].max()
+    quiet_cutoff_days = st.slider("'Went quiet' threshold (days since last seen)", 7, 60, 28, key="quiet_days")
+    quiet_cutoff = data_end - pd.Timedelta(days=quiet_cutoff_days)
+
+    active_units = unit_activity[unit_activity["last_seen"] >= quiet_cutoff]
+    quiet_units = unit_activity[unit_activity["last_seen"] < quiet_cutoff]
+
+    # Summary metrics
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Total Units", len(unit_activity))
+    s2.metric("Currently Active", len(active_units))
+    s3.metric("Gone Quiet", len(quiet_units))
+    s4.metric("Data Through", data_end.strftime("%b %d, %Y"))
+
+    # --- Chart 1: Units coming online per week ---
+    st.markdown("#### Units Coming Online (first seen per week)")
+    online_weekly = (
+        unit_activity.groupby(["first_week", cat_col])
+        .size()
+        .reset_index(name="units")
+    )
+    fig_online = px.bar(
+        online_weekly, x="first_week", y="units", color=cat_col,
+        title="New Units Coming Online per Week",
+        labels={"first_week": "", "units": "Units", cat_col: cat_label},
+        barmode="stack",
+    )
+    fig_online.update_layout(
+        xaxis=dict(rangeselector=RANGE_SELECTOR, rangeslider=dict(visible=True, thickness=0.05), type="date"),
+        height=400, margin=dict(t=60),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig_online, use_container_width=True)
+
+    # --- Chart 2: Units going quiet per week ---
+    st.markdown("#### Units Going Quiet (last seen per week, before cutoff)")
+    if quiet_units.empty:
+        st.info(f"No units have gone quiet (all seen within last {quiet_cutoff_days} days).")
+    else:
+        quiet_weekly = (
+            quiet_units.groupby(["last_week", cat_col])
+            .size()
+            .reset_index(name="units")
+        )
+        fig_quiet = px.bar(
+            quiet_weekly, x="last_week", y="units", color=cat_col,
+            title="Units Going Quiet per Week",
+            labels={"last_week": "", "units": "Units", cat_col: cat_label},
+            barmode="stack",
+            color_discrete_sequence=px.colors.qualitative.Pastel,
+        )
+        fig_quiet.update_layout(
+            xaxis=dict(rangeselector=RANGE_SELECTOR, rangeslider=dict(visible=True, thickness=0.05), type="date"),
+            height=400, margin=dict(t=60),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_quiet, use_container_width=True)
+
+    # --- Chart 3: Cumulative active fleet over time ---
+    st.markdown("#### Cumulative Active Fleet Over Time")
+    st.caption("A unit is counted as active from its first error week through its last error week.")
+
+    # Build weekly snapshots: for each week, count units whose first_seen <= week <= last_seen
+    all_weeks = pd.date_range(
+        start=unit_activity["first_week"].min(),
+        end=unit_activity["last_week"].max(),
+        freq="W-MON",
+    )
+    categories = sorted(unit_activity[cat_col].unique())
+    cumulative_rows = []
+    for week in all_weeks:
+        for cat in categories:
+            cat_units = unit_activity[unit_activity[cat_col] == cat]
+            active_count = ((cat_units["first_week"] <= week) & (cat_units["last_week"] >= week)).sum()
+            cumulative_rows.append({"week": week, cat_col: cat, "active_units": active_count})
+
+    cum_df = pd.DataFrame(cumulative_rows)
+    fig_cum = px.line(
+        cum_df, x="week", y="active_units", color=cat_col,
+        title="Active Fleet Size Over Time",
+        labels={"week": "", "active_units": "Active Units", cat_col: cat_label},
+        markers=True,
+    )
+    fig_cum.update_layout(
+        xaxis=dict(rangeselector=RANGE_SELECTOR, rangeslider=dict(visible=True, thickness=0.05), type="date"),
+        height=420, margin=dict(t=60),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig_cum, use_container_width=True)
+
+    # --- Unit list table ---
+    with st.expander("Full unit activity list"):
+        display_activity = unit_activity.copy()
+        display_activity["status"] = display_activity["last_seen"].apply(
+            lambda d: "Active" if d >= quiet_cutoff else "Quiet"
+        )
+        display_activity["days_since_last_seen"] = (data_end - display_activity["last_seen"]).dt.days
+        st.dataframe(
+            display_activity[["unit_name", cat_col, "first_seen", "last_seen", "days_since_last_seen", "status"]]
+            .sort_values("last_seen", ascending=False)
+            .style.format({"first_seen": "{:%Y-%m-%d}", "last_seen": "{:%Y-%m-%d}"}),
+            use_container_width=True,
+            height=400,
+        )
 
 
 # === TAB: Raw Data ===
